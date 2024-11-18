@@ -5,11 +5,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The {@code EventDispatcher} class is a central hub for managing events and their corresponding handlers. It supports both
@@ -26,7 +28,8 @@ public class EventDispatcher {
 	private static final EventDispatcherThreadFactory threadFactory = new EventDispatcherThreadFactory();
 
 	private final Map<Class<?>, List<EventHandlerEntry>> handlers;
-	private final PriorityBlockingQueue<AsyncEvent> queue;
+	private final PriorityBlockingQueue<AsyncEvent> asyncs;
+	private final Map<Class<?>, PriorityBlockingQueue<WaiterEvent>> waiters;
 	private final ExecutorService executor;
 
 	/**
@@ -34,12 +37,13 @@ public class EventDispatcher {
 	 */
 	public EventDispatcher() {
 		this.handlers = new ConcurrentHashMap<>();
-		this.queue = new PriorityBlockingQueue<>();
+		this.asyncs = new PriorityBlockingQueue<>();
+		this.waiters = new ConcurrentHashMap<>();
 		this.executor = Executors.newCachedThreadPool(threadFactory);
 		this.executor.submit(() -> {
 			while (!Thread.currentThread().isInterrupted())
 				try {
-					dispatchNow(queue.take().event);
+					dispatchNow(asyncs.take().event);
 				} catch (InterruptedException exception) {
 					Thread.currentThread().interrupt();
 				} catch (Exception exception) {
@@ -144,7 +148,7 @@ public class EventDispatcher {
 			if (Objects.isNull(entries) || entries.isEmpty())
 				throw new IllegalStateException(
 						String.format("No event handler found for event of class %s", event.getClass().getName()));
-			queue.add(new AsyncEvent(event, priority));
+			asyncs.add(new AsyncEvent(event, priority));
 		} catch (Exception exception) {
 			throw new EventDispatcherException(
 					String.format("Could not dispatch async event of class %s", event.getClass().getName()), exception);
@@ -162,6 +166,57 @@ public class EventDispatcher {
 	 */
 	public void dispatchAsync(Object event) {
 		dispatchAsync(event, EventPriority.MEDIUM);
+	}
+
+	/**
+	 * Dispatches an event to the waiter queue with a specified time-to-live (TTL). The event will remain in the queue until it
+	 * is either polled or its TTL expires.
+	 *
+	 * @param event    the event to dispatch; must not be {@code null}
+	 * @param ttl      the time-to-live duration for the event; must be greater than 1
+	 * @param timeUnit the {@link TimeUnit} of the TTL; must not be {@code null}
+	 * 
+	 * @throws NullPointerException     if the event or {@code timeUnit} is {@code null}
+	 * @throws IllegalArgumentException if the TTL is less than 1
+	 */
+	public void dispatchWaiter(Object event, long ttl, TimeUnit timeUnit) {
+		Objects.requireNonNull(event);
+		if (ttl < 1L)
+			throw new IllegalArgumentException("Waiter lifespan must be greater than 1");
+		long timestamp = updateWaiters();
+		waiters.computeIfAbsent(event.getClass(), k -> new PriorityBlockingQueue<>())
+				.add(new WaiterEvent(event, timestamp, timeUnit.toMillis(ttl)));
+	}
+
+	/**
+	 * Polls and retrieves the next event of the specified type from the waiter queue. If the event's lifespan has expired, it
+	 * is removed from the queue, and an empty {@link Optional} is returned.
+	 *
+	 * @param <T>  the type of the event
+	 * @param type the class of the event to poll; must not be {@code null}
+	 * 
+	 * @return an {@link Optional} containing the event if present and not expired; otherwise, an empty {@link Optional}
+	 * 
+	 * @throws NullPointerException if the type is {@code null}
+	 */
+	@SuppressWarnings("unchecked")
+	public <T> Optional<T> poll(Class<T> type) {
+		Objects.requireNonNull(type);
+		updateWaiters();
+		PriorityBlockingQueue<WaiterEvent> events = waiters.get(type);
+		if (events != null) {
+			WaiterEvent event = events.poll();
+			if (event != null)
+				return Optional.of((T) event.event);
+		}
+		return Optional.empty();
+	}
+
+	private long updateWaiters() {
+		long now = System.currentTimeMillis();
+		for (PriorityBlockingQueue<WaiterEvent> events : waiters.values())
+			events.removeIf(event -> now >= event.timestamp + event.lifetime);
+		return now;
 	}
 
 	/**
@@ -196,6 +251,25 @@ public class EventDispatcher {
 		@Override
 		public Thread newThread(Runnable runnable) {
 			return new Thread(runnable, String.format("EventDispatcherThread-%s", counter++));
+		}
+
+	}
+
+	private static class WaiterEvent implements Comparable<WaiterEvent> {
+
+		private final Object event;
+		private final long timestamp;
+		private final long lifetime;
+
+		public WaiterEvent(Object event, long timestamp, long lifetime) {
+			this.event = event;
+			this.timestamp = timestamp;
+			this.lifetime = lifetime;
+		}
+
+		@Override
+		public int compareTo(WaiterEvent other) {
+			return Long.compare(this.timestamp, other.timestamp);
 		}
 
 	}

@@ -7,6 +7,7 @@
  - Simple **API** for registering and unregistering event handlers.
  - Annotation-based event handler detection.
  - Supports synchronous and asynchronous event dispatching.
+ - Supports waiter event dispatching and polling.
  - Priority queue for managing asynchronous events.
  - Thread-safe operations with a built-in thread pool.
  
@@ -48,15 +49,22 @@ public class EventHandler {
 Create an instance of `EventDispatcher` and register your event handlers.
 
 ```java
-public class Main {
-    public static void main(String[] args) {
-        EventDispatcher dispatcher = new EventDispatcher();
-        dispatcher.register(new EventHandler());
-        dispatcher.dispatchNow(new Event("Hello, World!"));
-        dispatcher.dispatchAsync(new Event("Async Event"), EventPriority.HIGH);
-        dispatcher.shutdown();
-    }
-}
+EventDispatcher dispatcher = new EventDispatcher();
+dispatcher.register(new EventHandler());
+dispatcher.dispatchNow(new Event("Hello, World!"));
+dispatcher.dispatchAsync(new Event("Async Event"), EventPriority.HIGH);
+dispatcher.shutdown();
+```
+
+### 4. Use Waiters
+
+Waiters allow you to dispatch events with a time-to-live (TTL) and retrieve them later within their lifespan.
+
+```java
+EventDispatcher dispatcher = new EventDispatcher();
+dispatcher.dispatchWaiter(new Event("Waiting Event"), L5, TimeUnit.SECONDS);
+Optional<Event> event = dispatcher.pollWaiter(Event.class);
+event.ifPresent(e -> System.out.println("Polled event: " + e.getMessage()));
 ```
 
 ## Key Classes
